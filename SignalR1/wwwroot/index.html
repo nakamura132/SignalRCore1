@@ -1,0 +1,257 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>SignalR Relay クライアント</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.5/signalr.min.js"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+            display: flex;
+        }
+
+        #main {
+            flex: 1;
+        }
+
+        #console {
+            width: 45%;
+            margin-left: 20px;
+            background: #111;
+            color: #0f0;
+            padding: 10px;
+            overflow-y: auto;
+            max-height: 90vh;
+            font-family: monospace;
+            white-space: pre-wrap;
+            border: 1px solid #ccc;
+        }
+
+        select, button, textarea {
+            margin: 5px;
+        }
+
+        .section {
+            margin-bottom: 20px;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 10px;
+        }
+
+        .flex {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        th, td {
+            border: 1px solid #ccc;
+            padding: 5px;
+            text-align: left;
+        }
+
+        th {
+            background: #eee;
+        }
+
+        tbody {
+            max-height: 200px;
+            overflow-y: auto;
+            display: block;
+        }
+
+            thead, tbody tr {
+                display: table;
+                width: 100%;
+                table-layout: fixed;
+            }
+
+        button:disabled {
+            opacity: 0.5;
+        }
+    </style>
+</head>
+<body>
+    <div id="main">
+        <h1>SignalR Relay クライアント</h1>
+
+        <div class="section">
+            <h2>1. セッション操作</h2>
+            <div class="flex">
+                <button onclick="createSession()">セッション作成</button>
+                <select id="sessionSelect"></select>
+                <button onclick="disconnectSession()">セッション切断</button>
+                <button id="createChannelBtn" onclick="createChannel()" disabled>チャネル作成</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>2. チャネル一覧</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th><input type="checkbox" id="selectAllCb" onclick="toggleSelectAll(this)"></th>
+                        <th>セッション</th>
+                        <th>チャネル</th>
+                    </tr>
+                </thead>
+                <tbody id="channelTableBody"></tbody>
+            </table>
+            <div>
+                <button id="sendBtn" onclick="sendMessage()" disabled>メッセージ送信</button>
+                <button id="deleteBtn" onclick="deleteSelectedChannels()" disabled>チャネル削除</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>3. リレーセッションダンプ</h2>
+            <button onclick="dumpSessions()">セッション一覧取得</button>
+            <pre id="dumpOutput">（ここにセッション情報が表示されます）</pre>
+        </div>
+    </div>
+
+    <div id="console"><strong>=== 操作ログ ===</strong></div>
+
+    <script>
+        const sessions = new Map();
+        let sessionCounter = 1;
+        let channelCounter = 1;
+
+        const channelTable = document.getElementById('channelTableBody');
+        const sendBtn = document.getElementById('sendBtn');
+        const deleteBtn = document.getElementById('deleteBtn');
+        const createChannelBtn = document.getElementById('createChannelBtn');
+        const consoleArea = document.getElementById('console');
+
+        function log(message) {
+            const time = new Date().toLocaleTimeString();
+            consoleArea.textContent += `\n[${time}] ${message}`;
+            consoleArea.scrollTop = consoleArea.scrollHeight;
+        }
+
+        function updateSessionUI() {
+            const select = document.getElementById('sessionSelect');
+            select.innerHTML = '';
+            for (let sessionId of sessions.keys()) {
+                const opt = document.createElement('option');
+                opt.value = sessionId;
+                opt.textContent = sessionId;
+                select.appendChild(opt);
+            }
+            createChannelBtn.disabled = sessions.size === 0;
+        }
+
+        function updateChannelButtons() {
+            const checked = document.querySelectorAll('#channelTableBody input[type=checkbox]:checked');
+            sendBtn.disabled = checked.length === 0;
+            deleteBtn.disabled = checked.length === 0;
+        }
+
+        function toggleSelectAll(checkbox) {
+            const checkboxes = channelTable.querySelectorAll('input[type=checkbox]');
+            checkboxes.forEach(cb => cb.checked = checkbox.checked);
+            updateChannelButtons();
+        }
+
+        async function createSession() {
+            const sessionId = `session${sessionCounter++}`;
+            const connection = new signalR.HubConnectionBuilder()
+                .withUrl('/relay')
+                .build();
+
+            connection.on("ReceiveFromChannel", (channelId, message) => {
+                log(`[${sessionId}/${channelId}] 受信: ${message}`);
+            });
+
+            connection.on("ConnectionRejected", msg => {
+                log(`[${sessionId}] 拒否: ${msg}`);
+            });
+
+            await connection.start();
+            sessions.set(sessionId, connection);
+            updateSessionUI();
+            log(`セッション作成: ${sessionId}`);
+        }
+
+        async function disconnectSession() {
+            const sessionId = document.getElementById('sessionSelect').value;
+            const connection = sessions.get(sessionId);
+            if (connection) {
+                await connection.stop();
+                sessions.delete(sessionId);
+                [...channelTable.querySelectorAll('tr')].forEach(tr => {
+                    if (tr.dataset.sessionId === sessionId) tr.remove();
+                });
+                updateSessionUI();
+                updateChannelButtons();
+                log(`セッション切断: ${sessionId}`);
+            }
+        }
+
+        async function createChannel() {
+            const sessionId = document.getElementById('sessionSelect').value;
+            const connection = sessions.get(sessionId);
+            if (!connection) return;
+            const channelId = `ch${channelCounter++}`;
+            await connection.invoke("CreateChannel", channelId);
+
+            const tr = document.createElement('tr');
+            tr.dataset.sessionId = sessionId;
+            tr.dataset.channelId = channelId;
+            tr.innerHTML = `
+          <td><input type="checkbox" onchange="updateChannelButtons()"></td>
+          <td>${sessionId}</td>
+          <td>${channelId}</td>
+        `;
+            channelTable.appendChild(tr);
+            updateChannelButtons();
+            log(`チャネル作成: ${sessionId}/${channelId}`);
+        }
+
+        async function sendMessage() {
+            const message = `ただいまの時刻をお知らせします: ${new Date().toLocaleString()}`;
+            const selected = channelTable.querySelectorAll('input[type=checkbox]:checked');
+            for (let cb of selected) {
+                const tr = cb.closest('tr');
+                const sessionId = tr.dataset.sessionId;
+                const channelId = tr.dataset.channelId;
+                const connection = sessions.get(sessionId);
+                if (connection) {
+                    await connection.invoke("SendToChannel", channelId, message);
+                    log(`メッセージ送信: ${sessionId}/${channelId}`);
+                }
+            }
+        }
+
+        async function deleteSelectedChannels() {
+            const selected = channelTable.querySelectorAll('input[type=checkbox]:checked');
+            for (let cb of selected) {
+                const tr = cb.closest('tr');
+                const sessionId = tr.dataset.sessionId;
+                const channelId = tr.dataset.channelId;
+                const connection = sessions.get(sessionId);
+                if (connection) {
+                    await connection.invoke("CloseChannel", channelId);
+                    log(`チャネル削除: ${sessionId}/${channelId}`);
+                }
+                tr.remove();
+            }
+            updateChannelButtons();
+        }
+
+        async function dumpSessions() {
+            const res = await fetch('/api/sessions/dump');
+            const data = await res.json();
+            const out = document.getElementById('dumpOutput');
+            out.textContent = data.map(c => `Client: ${c.ClientId}\n  Channels: ${c.Channels.map(x => x.ChannelId).join(', ')}`).join('\n\n');
+            log("セッションダンプ取得");
+        }
+    </script>
+</body>
+</html>
